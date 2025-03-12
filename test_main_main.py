@@ -30,47 +30,19 @@ class TestValidPromptProcessing(unittest.TestCase):
 				mock_run.assert_called_once_with('Hello, agent!')
 
 class TestMainFunction(unittest.TestCase):
-	@patch('builtins.input', side_effect=['Hello', 'How are you?', 'exit'])
+	@patch('builtins.input', side_effect=['Hello', 'World', 'exit'])
 	@patch('app.agent.manus.Manus.run')
-	def test_multiple_prompts(self, mock_run, mock_input):
-		asyncio.run(main())
+	def test_accepts_multiple_prompts(self, mock_run, mock_input):
+		with self.assertLogs('app.logger', level='INFO') as log:
+			asyncio.run(main())
+		self.assertIn('Goodbye!', log.output)
 		self.assertEqual(mock_run.call_count, 2)
 
 class TestValidPromptLogging(unittest.TestCase):
 	@patch('builtins.input', side_effect=['Hello, World!'])
 	@patch('app.logger.logger.warning')
 	@patch('app.agent.manus.Manus.run')
-	def test_valid_prompt_logging(self, mock_run, mock_warning, mock_input):
-		asyncio.run(main())
-		mock_warning.assert_any_call('Processing your request...')
-		mock_run.assert_called_once_with('Hello, World!')
-
-class TestValidPromptProcessing(unittest.TestCase):
-	async def test_valid_prompt(self):
-		with unittest.mock.patch('builtins.input', return_value='Hello, World!'):
-			with unittest.mock.patch('app.agent.manus.Manus.run') as mock_run:
-				await main()
-				mock_run.assert_called_once_with('Hello, World!')
-
-class TestValidPromptProcessing(unittest.TestCase):
-	async def test_valid_prompt(self):
-		with unittest.mock.patch('builtins.input', side_effect=['Hello, agent!']):
-			with unittest.mock.patch('app.agent.manus.Manus.run') as mock_run:
-				await main()
-				mock_run.assert_called_once_with('Hello, agent!')
-
-class TestMainFunction(unittest.TestCase):
-	@patch('builtins.input', side_effect=['Hello', 'How are you?', 'exit'])
-	@patch('app.agent.manus.Manus.run')
-	def test_multiple_prompts(self, mock_run, mock_input):
-		asyncio.run(main())
-		self.assertEqual(mock_run.call_count, 2)
-
-class TestValidPromptLogging(unittest.TestCase):
-	@patch('builtins.input', side_effect=['Hello, World!'])
-	@patch('app.logger.logger.warning')
-	@patch('app.agent.manus.Manus.run')
-	def test_valid_prompt_logging(self, mock_run, mock_warning, mock_input):
+	def test_logging_valid_prompt(self, mock_run, mock_warning, mock_input):
 		mock_run.return_value = asyncio.Future()
 		mock_run.return_value.set_result(None)
 		with self.assertLogs('app.logger.logger', level='WARNING') as log:
