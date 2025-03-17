@@ -1,5 +1,6 @@
 from enum import Enum
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union, Callable
+import asyncio
 
 from pydantic import BaseModel, Field
 
@@ -107,20 +108,43 @@ class Message(BaseModel):
         )
 
 
-class Memory(BaseModel):
-    messages: List[Message] = Field(default_factory=list)
-    max_messages: int = Field(default=100)
+class Memory:
+    def __init__(self):
+        self.messages: List[Message] = []
+        self._observers: List[Callable[[Message], None]] = []
+        self.max_messages: int = 100
 
-    def add_message(self, message: Message) -> None:
-        """Add a message to memory"""
-        self.messages.append(message)
-        # Optional: Implement message limit
-        if len(self.messages) > self.max_messages:
-            self.messages = self.messages[-self.max_messages :]
+    async def add_message(self, message: Message):
+        """Add a message and notify observers"""
+        try:
+            self.messages.append(message)
+            # Notify all observers
+            for observer in self._observers:
+                try:
+                    await observer(message)
+                except Exception as e:
+                    logger.error(f"Error in observer: {str(e)}")
+            
+            # Optional: Implement message limit
+            if len(self.messages) > self.max_messages:
+                self.messages = self.messages[-self.max_messages:]
+        except Exception as e:
+            logger.error(f"Error adding message: {str(e)}")
+            raise
 
-    def add_messages(self, messages: List[Message]) -> None:
-        """Add multiple messages to memory"""
-        self.messages.extend(messages)
+    async def add_messages(self, messages: List[Message]):
+        """Add multiple messages asynchronously"""
+        for message in messages:
+            await self.add_message(message)
+
+    def add_observer(self, observer: Callable[[Message], None]):
+        """Add an observer to receive message updates"""
+        self._observers.append(observer)
+
+    def remove_observer(self, observer: Callable[[Message], None]):
+        """Remove an observer"""
+        if observer in self._observers:
+            self._observers.remove(observer)
 
     def clear(self) -> None:
         """Clear all messages"""

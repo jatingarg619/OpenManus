@@ -1,6 +1,14 @@
 import asyncio
 import json
-from typing import Optional
+import os
+import base64
+from typing import Optional, Callable, Dict, Any, List
+from PIL import Image
+from playwright.async_api import async_playwright, Browser, Page
+from datetime import datetime
+import aiohttp
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 from browser_use import Browser as BrowserUseBrowser
 from browser_use import BrowserConfig
@@ -10,269 +18,160 @@ from pydantic import Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
 
 from app.tool.base import BaseTool, ToolResult
+from app.logger import setup_logger
 
 MAX_LENGTH = 2000
-
-_BROWSER_DESCRIPTION = """
-Interact with a web browser to perform various actions such as navigation, element interaction,
-content extraction, and tab management. Supported actions include:
-- 'navigate': Go to a specific URL
-- 'click': Click an element by index
-- 'input_text': Input text into an element
-- 'screenshot': Capture a screenshot
-- 'get_html': Get page HTML content
-- 'get_text': Get text content of the page
-- 'read_links': Get all links on the page
-- 'execute_js': Execute JavaScript code
-- 'scroll': Scroll the page
-- 'switch_tab': Switch to a specific tab
-- 'new_tab': Open a new tab
-- 'close_tab': Close the current tab
-- 'refresh': Refresh the current page
-"""
-
+logger = setup_logger("browser_tool")
 
 class BrowserUseTool(BaseTool):
     name: str = "browser_use"
-    description: str = _BROWSER_DESCRIPTION
-    parameters: dict = {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": [
-                    "navigate",
-                    "click",
-                    "input_text",
-                    "screenshot",
-                    "get_html",
-                    "get_text",
-                    "execute_js",
-                    "scroll",
-                    "switch_tab",
-                    "new_tab",
-                    "close_tab",
-                    "refresh",
-                ],
-                "description": "The browser action to perform",
-            },
-            "url": {
-                "type": "string",
-                "description": "URL for 'navigate' or 'new_tab' actions",
-            },
-            "index": {
-                "type": "integer",
-                "description": "Element index for 'click' or 'input_text' actions",
-            },
-            "text": {"type": "string", "description": "Text for 'input_text' action"},
-            "script": {
-                "type": "string",
-                "description": "JavaScript code for 'execute_js' action",
-            },
-            "scroll_amount": {
-                "type": "integer",
-                "description": "Pixels to scroll (positive for down, negative for up) for 'scroll' action",
-            },
-            "tab_id": {
-                "type": "integer",
-                "description": "Tab ID for 'switch_tab' action",
-            },
-        },
-        "required": ["action"],
-        "dependencies": {
-            "navigate": ["url"],
-            "click": ["index"],
-            "input_text": ["index", "text"],
-            "execute_js": ["script"],
-            "switch_tab": ["tab_id"],
-            "new_tab": ["url"],
-            "scroll": ["scroll_amount"],
-        },
-    }
+    description: str = """Interact with a web browser to perform various actions."""
+    
+    browser: Optional[Browser] = None
+    page: Optional[Page] = None
+    event_handler: Optional[Callable[[Dict[str, Any]], None]] = None
+    context: Optional[BrowserContext] = None
+    dom_service: Optional[DomService] = None
+    
+    # Add base directory for local files
+    base_dir: str = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
-    lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
-    browser: Optional[BrowserUseBrowser] = Field(default=None, exclude=True)
-    context: Optional[BrowserContext] = Field(default=None, exclude=True)
-    dom_service: Optional[DomService] = Field(default=None, exclude=True)
+    async def _ensure_browser(self) -> None:
+        """Ensure browser is initialized"""
+        if not self.browser:
+            logger.info("Initializing browser...")
+            playwright = await async_playwright().start()
+            self.browser = await playwright.chromium.launch(
+                headless=True  # Run in headless mode
+            )
+            self.page = await self.browser.new_page()
+            
+            # Set up event handlers
+            def handle_navigation(frame):
+                if frame is self.page.main_frame:
+                    asyncio.create_task(self._notify_url_change(frame.url))
+            
+            self.page.on("framenavigated", handle_navigation)
+            logger.info("Browser initialized successfully")
 
-    @field_validator("parameters", mode="before")
-    def validate_parameters(cls, v: dict, info: ValidationInfo) -> dict:
-        if not v:
-            raise ValueError("Parameters cannot be empty")
-        return v
-
-    async def _ensure_browser_initialized(self) -> BrowserContext:
-        """Ensure browser and context are initialized."""
-        if self.browser is None:
-            self.browser = BrowserUseBrowser(BrowserConfig(headless=False))
-        if self.context is None:
-            self.context = await self.browser.new_context()
-            self.dom_service = DomService(await self.context.get_current_page())
-        return self.context
-
-    async def execute(
-        self,
-        action: str,
-        url: Optional[str] = None,
-        index: Optional[int] = None,
-        text: Optional[str] = None,
-        script: Optional[str] = None,
-        scroll_amount: Optional[int] = None,
-        tab_id: Optional[int] = None,
-        **kwargs,
-    ) -> ToolResult:
-        """
-        Execute a specified browser action.
-
-        Args:
-            action: The browser action to perform
-            url: URL for navigation or new tab
-            index: Element index for click or input actions
-            text: Text for input action
-            script: JavaScript code for execution
-            scroll_amount: Pixels to scroll for scroll action
-            tab_id: Tab ID for switch_tab action
-            **kwargs: Additional arguments
-
-        Returns:
-            ToolResult with the action's output or error
-        """
-        async with self.lock:
+    async def _notify_url_change(self, url: str) -> None:
+        """Notify frontend of URL changes via API endpoint"""
+        try:
+            print(f"Updating URL to: {url}")
+            # Change port to 8001 to match our test server
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://localhost:8001/api/browser/update-url", 
+                    json={"url": url}
+                ) as response:
+                    if response.status == 200:
+                        print(f"Successfully updated URL via API")
+                    else:
+                        print(f"Failed to update URL: {await response.text()}")
+        except Exception as e:
+            print(f"Error updating URL: {e}")
+            
+        # Still try the event handler as a fallback
+        if self.event_handler:
             try:
-                context = await self._ensure_browser_initialized()
+                await self.event_handler({
+                    "type": "browser_event",
+                    "content": {"url": url}
+                })
+            except Exception as e:
+                print(f"Error with event handler: {e}")
 
-                if action == "navigate":
-                    if not url:
-                        return ToolResult(error="URL is required for 'navigate' action")
-                    await context.navigate_to(url)
+    async def _update_url(self, url: str) -> None:
+        """Update the current URL in the browser state"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    "http://localhost:8001/api/browser/update-url",
+                    json={"url": url}
+                )
+        except Exception as e:
+            logger.error(f"Failed to update URL: {e}")
+
+    async def execute(self, **kwargs) -> ToolResult:
+        """Execute browser actions"""
+        try:
+            await self._ensure_browser()
+            action = kwargs.get("action", "navigate")
+            url = kwargs.get("url")
+            filepath = kwargs.get("filepath")
+
+            logger.info(f"Executing action '{action}' with URL: {url} or file: {filepath}")
+
+            if action == "navigate":
+                # If we have a filepath, prioritize it
+                if filepath:
+                    # Convert relative paths to absolute using base_dir
+                    if not os.path.isabs(filepath):
+                        filepath = os.path.join(self.base_dir, filepath)
+
+                    # Get file contents from server
+                    async with aiohttp.ClientSession() as session:
+                        response = await session.post(
+                            "http://localhost:8001/api/browser/open-local-file",
+                            json={"file_path": filepath}
+                        )
+                        if response.status == 200:
+                            data = await response.json()
+                            # Set content directly in page
+                            await self.page.set_content(data["content"])
+                            # Update URL to show filepath
+                            await self._update_url(f"file://{filepath}")
+                            return ToolResult(output=f"Loaded local file: {filepath}")
+                        else:
+                            error_text = await response.text()
+                            return ToolResult(error=f"Failed to load file: {error_text}")
+                elif url:
+                    await self.page.goto(url, wait_until="networkidle")
                     return ToolResult(output=f"Navigated to {url}")
-
-                elif action == "click":
-                    if index is None:
-                        return ToolResult(error="Index is required for 'click' action")
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    download_path = await context._click_element_node(element)
-                    output = f"Clicked element at index {index}"
-                    if download_path:
-                        output += f" - Downloaded file to {download_path}"
-                    return ToolResult(output=output)
-
-                elif action == "input_text":
-                    if index is None or not text:
-                        return ToolResult(
-                            error="Index and text are required for 'input_text' action"
-                        )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    await context._input_text_element_node(element, text)
-                    return ToolResult(
-                        output=f"Input '{text}' into element at index {index}"
-                    )
-
-                elif action == "screenshot":
-                    screenshot = await context.take_screenshot(full_page=True)
-                    return ToolResult(
-                        output=f"Screenshot captured (base64 length: {len(screenshot)})",
-                        system=screenshot,
-                    )
-
-                elif action == "get_html":
-                    html = await context.get_page_html()
-                    truncated = html[:MAX_LENGTH] + "..." if len(html) > MAX_LENGTH else html
-                    return ToolResult(output=truncated)
-
-                elif action == "get_text":
-                    text = await context.execute_javascript("document.body.innerText")
-                    return ToolResult(output=text)
-
-                elif action == "read_links":
-                    links = await context.execute_javascript(
-                        "document.querySelectorAll('a[href]').forEach((elem) => {if (elem.innerText) {console.log(elem.innerText, elem.href)}})"
-                    )
-                    return ToolResult(output=links)
-
-                elif action == "execute_js":
-                    if not script:
-                        return ToolResult(
-                            error="Script is required for 'execute_js' action"
-                        )
-                    result = await context.execute_javascript(script)
-                    return ToolResult(output=str(result))
-
-                elif action == "scroll":
-                    if scroll_amount is None:
-                        return ToolResult(
-                            error="Scroll amount is required for 'scroll' action"
-                        )
-                    await context.execute_javascript(
-                        f"window.scrollBy(0, {scroll_amount});"
-                    )
-                    direction = "down" if scroll_amount > 0 else "up"
-                    return ToolResult(
-                        output=f"Scrolled {direction} by {abs(scroll_amount)} pixels"
-                    )
-
-                elif action == "switch_tab":
-                    if tab_id is None:
-                        return ToolResult(
-                            error="Tab ID is required for 'switch_tab' action"
-                        )
-                    await context.switch_to_tab(tab_id)
-                    return ToolResult(output=f"Switched to tab {tab_id}")
-
-                elif action == "new_tab":
-                    if not url:
-                        return ToolResult(error="URL is required for 'new_tab' action")
-                    await context.create_new_tab(url)
-                    return ToolResult(output=f"Opened new tab with URL {url}")
-
-                elif action == "close_tab":
-                    await context.close_current_tab()
-                    return ToolResult(output="Closed current tab")
-
-                elif action == "refresh":
-                    await context.refresh_page()
-                    return ToolResult(output="Refreshed current page")
-
                 else:
-                    return ToolResult(error=f"Unknown action: {action}")
+                    return ToolResult(error="Either URL or filepath is required")
 
-            except Exception as e:
-                return ToolResult(error=f"Browser action '{action}' failed: {str(e)}")
+            elif action == "click":
+                selector = kwargs.get("selector")
+                if not selector:
+                    return ToolResult(error="Selector is required for clicking")
+                
+                await self.page.click(selector)
+                current_url = self.page.url
+                await self._update_url(current_url)
+                return ToolResult(output=f"Clicked element: {selector}")
 
-    async def get_current_state(self) -> ToolResult:
-        """Get the current browser state as a ToolResult."""
-        async with self.lock:
-            try:
-                context = await self._ensure_browser_initialized()
-                state = await context.get_state()
-                state_info = {
-                    "url": state.url,
-                    "title": state.title,
-                    "tabs": [tab.model_dump() for tab in state.tabs],
-                    "interactive_elements": state.element_tree.clickable_elements_to_string(),
-                }
-                return ToolResult(output=json.dumps(state_info))
-            except Exception as e:
-                return ToolResult(error=f"Failed to get browser state: {str(e)}")
+            elif action == "read":
+                # Get page content
+                content = await self.page.content()
+                return ToolResult(output=f"Read page content: {content[:MAX_LENGTH]}")
 
-    async def cleanup(self):
-        """Clean up browser resources."""
-        async with self.lock:
-            if self.context is not None:
-                await self.context.close()
-                self.context = None
-                self.dom_service = None
-            if self.browser is not None:
-                await self.browser.close()
-                self.browser = None
+            elif action == "type":
+                selector = kwargs.get("selector")
+                text = kwargs.get("text")
+                if not selector or not text:
+                    return ToolResult(error="Selector and text are required for typing")
+                
+                await self.page.type(selector, text)
+                return ToolResult(output=f"Typed text into {selector}")
 
-    def __del__(self):
-        """Ensure cleanup when object is destroyed."""
-        if self.browser is not None or self.context is not None:
+            else:
+                return ToolResult(error=f"Unknown action: {action}. Supported actions are: navigate, click, read, type")
+
+        except Exception as e:
+            logger.error(f"Browser action failed: {e}", exc_info=True)
+            return ToolResult(error=str(e))
+
+    async def cleanup(self) -> None:
+        """Clean up browser resources"""
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+            self.page = None
+
+    def __del__(self) -> None:
+        """Ensure cleanup when object is destroyed"""
+        if self.browser:
             try:
                 asyncio.run(self.cleanup())
             except RuntimeError:

@@ -36,7 +36,7 @@ class ToolCallAgent(ReActAgent):
         """Process current state and decide next actions using tools"""
         if self.next_step_prompt:
             user_msg = Message.user_message(self.next_step_prompt)
-            self.messages += [user_msg]
+            await self.memory.add_message(user_msg)
 
         # Get response with tool options
         response = await self.llm.ask_tool(
@@ -79,7 +79,7 @@ class ToolCallAgent(ReActAgent):
                 if self.tool_calls
                 else Message.assistant_message(response.content)
             )
-            self.memory.add_message(assistant_msg)
+            await self.memory.add_message(assistant_msg)
 
             if self.tool_choices == "required" and not self.tool_calls:
                 return True  # Will be handled in act()
@@ -88,13 +88,11 @@ class ToolCallAgent(ReActAgent):
             if self.tool_choices == "auto" and not self.tool_calls:
                 return bool(response.content)
 
-            return bool(self.tool_calls)
+            return bool(self.tool_calls or response.content)
         except Exception as e:
-            logger.error(f"🚨 Oops! The {self.name}'s thinking process hit a snag: {e}")
-            self.memory.add_message(
-                Message.assistant_message(
-                    f"Error encountered while processing: {str(e)}"
-                )
+            logger.error(f"🚨 Error in thinking process: {e}")
+            await self.memory.add_message(
+                Message.assistant_message(f"Error encountered: {str(e)}")
             )
             return False
 
@@ -109,17 +107,27 @@ class ToolCallAgent(ReActAgent):
 
         results = []
         for command in self.tool_calls:
-            result = await self.execute_tool(command)
-            logger.info(
-                f"🎯 Tool '{command.function.name}' completed its mission! Result: {result}"
-            )
+            try:
+                result = await self.execute_tool(command)
+                logger.info(
+                    f"🎯 Tool '{command.function.name}' completed its mission! Result: {result}"
+                )
 
-            # Add tool response to memory
-            tool_msg = Message.tool_message(
-                content=result, tool_call_id=command.id, name=command.function.name
-            )
-            self.memory.add_message(tool_msg)
-            results.append(result)
+                # Add tool response to memory
+                tool_msg = Message.tool_message(
+                    content=result, 
+                    tool_call_id=command.id, 
+                    name=command.function.name
+                )
+                await self.memory.add_message(tool_msg)
+                results.append(result)
+            except Exception as e:
+                error_msg = f"Error executing tool {command.function.name}: {str(e)}"
+                logger.error(error_msg)
+                await self.memory.add_message(
+                    Message.assistant_message(error_msg)
+                )
+                results.append(error_msg)
 
         return "\n\n".join(results)
 

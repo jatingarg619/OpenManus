@@ -1,32 +1,41 @@
+import logging
 import sys
-from datetime import datetime
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
-from loguru import logger as _logger
+# Create logs directory if it doesn't exist
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
 
-from app.config import PROJECT_ROOT
+# Configure logging
+def setup_logger(name: str = "app"):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
 
+    # Console handler with simpler format for readability
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')  # Just show the message
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
 
-_print_level = "INFO"
+    # File handler with detailed format for debugging
+    file_handler = RotatingFileHandler(
+        logs_dir / "app.log",
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d - %(message)s'
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
 
+    return logger
 
-def define_log_level(print_level="INFO", logfile_level="DEBUG", name: str = None):
-    """Adjust the log level to above level"""
-    global _print_level
-    _print_level = print_level
-
-    current_date = datetime.now()
-    formatted_date = current_date.strftime("%Y%m%d%H%M%S")
-    log_name = (
-        f"{name}_{formatted_date}" if name else formatted_date
-    )  # name a log with prefix name
-
-    _logger.remove()
-    _logger.add(sys.stderr, level=print_level)
-    _logger.add(PROJECT_ROOT / f"logs/{log_name}.log", level=logfile_level)
-    return _logger
-
-
-logger = define_log_level()
+# Create main logger
+logger = setup_logger()
 
 
 if __name__ == "__main__":

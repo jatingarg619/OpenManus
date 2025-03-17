@@ -1,0 +1,38 @@
+.browser-view {
+  position: relative;
+  background: #fff;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.browser-toolbar {
+  background: #f5f5f5;
+  border-bottom: 1px solid #ddd;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-content {
+  position: relative;
+  height: 100%;
+}
+
+.browser-content img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.browser-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+} 

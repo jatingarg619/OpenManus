@@ -1,12 +1,14 @@
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Dict, Any
+import asyncio
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.llm import LLM
 from app.logger import logger
 from app.schema import AgentState, Memory, Message
+from app.config import config
 
 
 class BaseAgent(BaseModel, ABC):
@@ -40,6 +42,11 @@ class BaseAgent(BaseModel, ABC):
     current_step: int = Field(default=0, description="Current step in execution")
 
     duplicate_threshold: int = 2
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.thinking_enabled = True
+        self.progress_enabled = True
 
     class Config:
         arbitrary_types_allowed = True
@@ -80,22 +87,13 @@ class BaseAgent(BaseModel, ABC):
         finally:
             self.state = previous_state  # Revert to previous state
 
-    def update_memory(
+    async def update_memory(
         self,
         role: Literal["user", "system", "assistant", "tool"],
         content: str,
         **kwargs,
     ) -> None:
-        """Add a message to the agent's memory.
-
-        Args:
-            role: The role of the message sender (user, system, assistant, tool).
-            content: The message content.
-            **kwargs: Additional arguments (e.g., tool_call_id for tool messages).
-
-        Raises:
-            ValueError: If the role is unsupported.
-        """
+        """Add a message to the agent's memory."""
         message_map = {
             "user": Message.user_message,
             "system": Message.system_message,
@@ -108,44 +106,51 @@ class BaseAgent(BaseModel, ABC):
 
         msg_factory = message_map[role]
         msg = msg_factory(content, **kwargs) if role == "tool" else msg_factory(content)
-        self.memory.add_message(msg)
+        await self.memory.add_message(msg)
 
     async def run(self, request: Optional[str] = None) -> str:
-        """Execute the agent's main loop asynchronously.
-
-        Args:
-            request: Optional initial user request to process.
-
-        Returns:
-            A string summarizing the execution results.
-
-        Raises:
-            RuntimeError: If the agent is not in IDLE state at start.
-        """
+        """Execute the agent's main loop asynchronously."""
         if self.state != AgentState.IDLE:
             raise RuntimeError(f"Cannot run agent from state: {self.state}")
 
         if request:
-            self.update_memory("user", request)
+            await self.update_memory("user", request)
 
         results: List[str] = []
+        stuck_count = 0
+        max_stuck_retries = 3
+
         async with self.state_context(AgentState.RUNNING):
             while (
-                self.current_step < self.max_steps and self.state != AgentState.FINISHED
+                self.current_step < self.max_steps and 
+                self.state != AgentState.FINISHED
             ):
                 self.current_step += 1
                 logger.info(f"Executing step {self.current_step}/{self.max_steps}")
-                step_result = await self.step()
-
-                # Check for stuck state
-                if self.is_stuck():
-                    self.handle_stuck_state()
-
-                results.append(f"Step {self.current_step}: {step_result}")
+                
+                try:
+                    step_result = await self.step()
+                    
+                    # Check for stuck state
+                    if self.is_stuck():
+                        stuck_count += 1
+                        if stuck_count >= max_stuck_retries:
+                            logger.warning("Agent appears to be stuck, terminating execution")
+                            break
+                        self.handle_stuck_state()
+                    else:
+                        stuck_count = 0  # Reset stuck count if we make progress
+                    
+                    results.append(f"Step {self.current_step}: {step_result}")
+                except Exception as e:
+                    error_msg = f"Error in step {self.current_step}: {str(e)}"
+                    logger.error(error_msg)
+                    results.append(error_msg)
+                    break
 
             if self.current_step >= self.max_steps:
-                self.current_step = 0  # setting back to 0 when reached max steps
-                self.state = AgentState.IDLE  # setting the status
+                self.current_step = 0
+                self.state = AgentState.IDLE
                 results.append(f"Terminated: Reached max steps ({self.max_steps})")
 
         return "\n".join(results) if results else "No steps executed"
@@ -191,3 +196,35 @@ class BaseAgent(BaseModel, ABC):
     def messages(self, value: List[Message]):
         """Set the list of messages in the agent's memory."""
         self.memory.messages = value
+
+    async def process_message(self, message: str) -> Dict[str, Any]:
+        """Process a user message and return a response"""
+        # Override in subclasses
+        pass
+        
+    async def send_thinking(self, thought: str):
+        """Send thinking update to frontend"""
+        if self.thinking_enabled and config.websocket:
+            await config.websocket.send_json({
+                "type": "thinking",
+                "content": thought
+            })
+            # Add small delay for realistic effect
+            await asyncio.sleep(0.5)
+            
+    async def send_progress(self, step: str):
+        """Send progress update to frontend"""
+        if self.progress_enabled and config.websocket:
+            await config.websocket.send_json({
+                "type": "progress",
+                "content": step
+            })
+            
+    async def send_result(self, content: str, files: Optional[List[Dict]] = None):
+        """Send final result with any file attachments"""
+        if config.websocket:
+            await config.websocket.send_json({
+                "type": "result",
+                "content": content,
+                "files": files or []
+            })

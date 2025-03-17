@@ -34,6 +34,9 @@ class Config:
     _lock = threading.Lock()
     _initialized = False
 
+    # Add websocket attribute
+    websocket = None
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
