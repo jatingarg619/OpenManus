@@ -29,7 +29,7 @@ class BrowserUseTool(BaseTool):
     
     browser: Optional[Browser] = None
     page: Optional[Page] = None
-    event_handler: Optional[Callable[[Dict[str, Any]], None]] = None
+    event_handler: Optional[Callable] = None
     context: Optional[BrowserContext] = None
     dom_service: Optional[DomService] = None
     
@@ -72,14 +72,7 @@ class BrowserUseTool(BaseTool):
             print(f"Error updating URL: {e}")
             
         # Still try the event handler as a fallback
-        if self.event_handler:
-            try:
-                await self.event_handler({
-                    "type": "browser_event",
-                    "content": {"url": url}
-                })
-            except Exception as e:
-                print(f"Error with event handler: {e}")
+        await self._send_event("browser_event", {"url": url})
 
     async def _update_url(self, url: str) -> None:
         """Update the current URL in the browser state"""
@@ -91,6 +84,22 @@ class BrowserUseTool(BaseTool):
                 )
         except Exception as e:
             logger.error(f"Failed to update URL: {e}")
+
+    async def _send_event(self, event_type: str, data: dict):
+        """Send a browser event to the client"""
+        if self.event_handler:
+            try:
+                await self.event_handler({
+                    "type": event_type,
+                    "content": data
+                })
+            except Exception as e:
+                print(f"Error sending browser event: {e}")
+                return False
+        else:
+            print(f"WARNING: No event handler available for browser events")
+            return False
+        return True
 
     async def execute(self, **kwargs) -> ToolResult:
         """Execute browser actions"""

@@ -1,95 +1,159 @@
-import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import traceback
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import json
+import base64
+from PIL import Image
+import io
+from datetime import datetime
 
-from app.config import config
-from app.api.websocket import WebSocketHandler
 from app.agent.manus import Manus
-from app.llm import LLM
+from app.schema import Message
+from app.logger import setup_logger
 from app.tool.browser_use_tool import BrowserUseTool
-from app.tool.python_execute import PythonExecute
-from app.tool.file_saver import FileSaver
-from app.tool.google_search import GoogleSearch
-from app.tool import Terminate
-from app.logger import logger
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="OpenManus API",
-    description="API for OpenManus AI assistant",
-    version="0.1.0"
-)
+app = FastAPI()
+
+# Get the base directory
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+STATIC_DIR = BASE_DIR / 'static'
+TEMP_DIR = STATIC_DIR / 'temp'
+
+# Create directories if they don't exist
+STATIC_DIR.mkdir(exist_ok=True)
+TEMP_DIR.mkdir(exist_ok=True)
+
+# Mount static files directory
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development - restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize LLM with appropriate config
-llm = LLM()  # This will use the config from config.toml
+# Create API-specific logger
+logger = setup_logger("api")
 
-# Initialize tools
-tools_list = [
-    BrowserUseTool(),
-    PythonExecute(timeout=30),
-    FileSaver(),
-    GoogleSearch(),
-    Terminate()
-]
+class BrowserEvent:
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
 
-# Convert tools list to dictionary before passing to Manus
-tools_dict = {tool.name: tool for tool in tools_list}
+    async def on_browser_update(self, data: dict):
+        """Handle browser state updates"""
+        try:
+            await self.websocket.send_text(json.dumps({
+                "type": "browser_event",
+                "content": {
+                    "url": data.get("url"),
+                    "timestamp": str(datetime.now())
+                }
+            }))
+        except Exception as e:
+            logger.error(f"Error sending browser update: {e}")
 
-try:
-    # Initialize agent with tools as a dictionary
-    agent = Manus(
-        llm=llm,
-        tools=tools_dict  # Pass as dictionary to satisfy Pydantic validation
-    )
-    ws_handler = WebSocketHandler(agent)
-except Exception as e:
-    logger.error(f"Error initializing agent: {e}")
-    logger.error(traceback.format_exc())
-    raise
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    agent = None
+    
+    try:
+        agent = Manus()
+        browser_event = BrowserEvent(websocket)
+        
+        while True:
+            try:
+                data = await websocket.receive_text()
+                request = json.loads(data)
+                prompt = request.get("prompt")
+                
+                if prompt:
+                    logger.info(f"\n{prompt}\n")  # Log the user's prompt
+                    
+                # Add message observer to capture agent's thoughts and actions
+                async def message_observer(message: Message):
+                    """Send real-time updates about agent's progress"""
+                    try:
+                        if message.role == "assistant":
+                            await websocket.send_text(json.dumps({
+                                "type": "thinking",
+                                "content": message.content
+                            }))
+                        elif message.role == "tool":
+                            await websocket.send_text(json.dumps({
+                                "type": "action",
+                                "content": f"Using tool: {message.name}\nResult: {message.content}"
+                            }))
+                    except WebSocketDisconnect:
+                        logger.warning("WebSocket disconnected while sending updates")
+                        raise
 
-@app.get("/")
-async def root():
-    return {"message": "OpenManus API is running"}
+                try:
+                    # Register message observer
+                    agent.memory.add_observer(message_observer)
+                    
+                    # Initialize agent with the prompt
+                    await agent.update_memory("user", prompt)
+                    
+                    # Send initial status
+                    await websocket.send_text(json.dumps({
+                        "type": "status",
+                        "content": "Agent is analyzing your request..."
+                    }))
+                    
+                    # Run agent
+                    result = await agent.run()
+                    
+                    # Send final result
+                    await websocket.send_text(json.dumps({
+                        "type": "result",
+                        "content": result
+                    }))
+                    
+                except Exception as e:
+                    logger.error(f"Error during agent execution: {str(e)}")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "content": f"Agent error: {str(e)}"
+                    }))
+                finally:
+                    # Clean up observer and memory
+                    agent.memory.remove_observer(message_observer)
+                    agent.memory.clear()
+                    
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(str(e))
+                break
+                    
+    except WebSocketDisconnect:
+        logger.info("Client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}", exc_info=True)
+    finally:
+        if agent:
+            logger.info("Cleaning up agent resources")
+            agent.memory.clear()
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "components": {
-            "agent": agent is not None,
-            "websocket": ws_handler is not None,
-            "llm": llm is not None,
-            "tools": {
-                tool_name: True for tool_name in tools_dict.keys()
-            }
-        }
-    }
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await ws_handler.connect(websocket)
     try:
-        while True:
-            data = await websocket.receive_text()
-            await ws_handler.handle_message(websocket, data)
-    except WebSocketDisconnect:
-        await ws_handler.disconnect(websocket)
+        # Add any additional health checks here
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "version": "1.0.0"
+        }
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await ws_handler.disconnect(websocket)
+        raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port) 
+@app.get("/docs")
+async def get_docs():
+    """Swagger documentation endpoint"""
+    return {"openapi_url": "/openapi.json"} 

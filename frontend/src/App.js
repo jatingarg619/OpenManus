@@ -98,24 +98,31 @@ function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.group('WebSocket Message Received');
-        console.log('Raw data:', data);
+        console.log('Received WebSocket message:', data.type);
         
-        switch (data.type) {
-          case 'browser_event':
-            console.log('Browser event received:', data);
-            setBrowserData(data);
-            setShowBrowser(true);
-            break;
-          default:
-            console.log('Message event:', data);
-            setMessages(prev => [...prev, data]);
-            setIsLoading(data.type !== 'result');
+        // Handle all browser-related updates
+        if (data.type === 'browser_content' || data.type === 'browser_event') {
+          console.log('Setting browser data:', data.type, data.content ? Object.keys(data.content) : 'no content');
+          setBrowserData(data);
+          setShowBrowser(true);
         }
         
-        console.groupEnd();
+        // Handle other message types...
+        if (data.type === 'thinking') {
+          setMessages(prev => [...prev, { type: 'thinking', content: data.content }]);
+        } else if (data.type === 'action') {
+          setMessages(prev => [...prev, { type: 'action', content: data.content }]);
+        } else if (data.type === 'result') {
+          setIsLoading(false);
+          setMessages(prev => [...prev, { type: 'result', content: data.content }]);
+        } else if (data.type === 'status') {
+          setMessages(prev => [...prev, { type: 'status', content: data.content }]);
+        } else if (data.type === 'error') {
+          setIsLoading(false);
+          setMessages(prev => [...prev, { type: 'error', content: data.content }]);
+        }
       } catch (error) {
-        console.error('Error handling websocket message:', error);
+        console.error('Error processing message:', error);
       }
     };
 
@@ -327,7 +334,7 @@ function App() {
                 borderColor: 'divider'
               }}>
                 <Typography variant="subtitle1" gutterBottom>
-                  Web Browser
+                  Web Browser {browserData?.type === 'browser_content' ? '(HTML Content)' : ''}
                 </Typography>
                 <Box sx={{ flexGrow: 1 }}>
                   <Suspense fallback={<div>Loading browser...</div>}>

@@ -137,17 +137,26 @@ class ToolCallAgent(ReActAgent):
             return "Error: Invalid command format"
 
         name = command.function.name
-        if name not in self.available_tools.tool_map:
-            return f"Error: Unknown tool '{name}'"
-
+        
+        # Debug output
+        print(f"Executing tool: {name}")
+        
         try:
             # Parse arguments
             args = json.loads(command.function.arguments or "{}")
-
+            
+            # Get the tool instance
+            tool = self.available_tools.get_tool(name)
+            
+            # Important: Update event_handler right before execution
+            if hasattr(tool, 'event_handler') and hasattr(self, 'send_browser_event'):
+                tool.event_handler = self.send_browser_event
+                print(f"Set event_handler for tool {name} before execution")
+            
             # Execute the tool
             logger.info(f"🔧 Activating tool: '{name}'...")
             result = await self.available_tools.execute(name=name, tool_input=args)
-
+            
             # Format result for display
             observation = (
                 f"Observed output of cmd `{name}` executed:\n{str(result)}"

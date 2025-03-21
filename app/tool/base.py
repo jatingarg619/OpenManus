@@ -80,3 +80,48 @@ class ToolFailure(ToolResult):
 
 class AgentAwareTool:
     agent: Optional = None
+
+
+class ToolCollection:
+    """Collection of tools"""
+    def __init__(self, *tools):
+        self.tools = list(tools)
+        self.tool_map = {tool.name: tool for tool in tools}
+
+    def add_tool(self, tool):
+        """Add a tool to the collection"""
+        self.tools.append(tool)
+        self.tool_map[tool.name] = tool
+
+    def to_params(self):
+        """Convert all tools to function call format"""
+        return [tool.to_param() for tool in self.tools]
+
+    def get_tool(self, name):
+        """Get a tool by name"""
+        return self.tool_map.get(name)
+
+    async def execute(self, **kwargs):
+        """Execute a tool by name with arguments"""
+        name = kwargs.pop("name", None)
+        tool_input = kwargs.pop("tool_input", {})
+        
+        if not name:
+            return "Error: Tool name is required"
+            
+        tool = self.get_tool(name)
+        if not tool:
+            return f"Error: Tool '{name}' not found"
+        
+        print(f"DEBUG: Executing tool {name}, has event_handler: {hasattr(tool, 'event_handler')}")
+        if hasattr(tool, 'event_handler'):
+            print(f"DEBUG: Event handler for {name} is: {tool.event_handler}")
+        
+        try:
+            result = await tool.execute(**tool_input)
+            return str(result)
+        except Exception as e:
+            print(f"Error executing {name}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return f"Error: {str(e)}"

@@ -1,14 +1,12 @@
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import List, Literal, Optional, Dict, Any
-import asyncio
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.llm import LLM
 from app.logger import logger
 from app.schema import AgentState, Memory, Message
-from app.config import config
 
 
 class BaseAgent(BaseModel, ABC):
@@ -42,11 +40,6 @@ class BaseAgent(BaseModel, ABC):
     current_step: int = Field(default=0, description="Current step in execution")
 
     duplicate_threshold: int = 2
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        self.thinking_enabled = True
-        self.progress_enabled = True
 
     class Config:
         arbitrary_types_allowed = True
@@ -196,35 +189,3 @@ class BaseAgent(BaseModel, ABC):
     def messages(self, value: List[Message]):
         """Set the list of messages in the agent's memory."""
         self.memory.messages = value
-
-    async def process_message(self, message: str) -> Dict[str, Any]:
-        """Process a user message and return a response"""
-        # Override in subclasses
-        pass
-        
-    async def send_thinking(self, thought: str):
-        """Send thinking update to frontend"""
-        if self.thinking_enabled and config.websocket:
-            await config.websocket.send_json({
-                "type": "thinking",
-                "content": thought
-            })
-            # Add small delay for realistic effect
-            await asyncio.sleep(0.5)
-            
-    async def send_progress(self, step: str):
-        """Send progress update to frontend"""
-        if self.progress_enabled and config.websocket:
-            await config.websocket.send_json({
-                "type": "progress",
-                "content": step
-            })
-            
-    async def send_result(self, content: str, files: Optional[List[Dict]] = None):
-        """Send final result with any file attachments"""
-        if config.websocket:
-            await config.websocket.send_json({
-                "type": "result",
-                "content": content,
-                "files": files or []
-            })

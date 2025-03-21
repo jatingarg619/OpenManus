@@ -4,11 +4,13 @@ import FileSelector from './FileSelector';
 // Memoize the component to prevent unnecessary re-renders
 const BrowserView = memo(({ browserData, onNavigate }) => {
   const [url, setUrl] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const [content, setContent] = useState('');
+  const [htmlContent, setHtmlContent] = useState('');
+  const [displayType, setDisplayType] = useState('url'); // 'url', 'html', or 'file'
+  const [isLoading, setIsLoading] = useState(false);
   const [localFileName, setLocalFileName] = useState('');
 
-  // Define handleFileSelect first
+  // Define handleFileSelect first, before using it in useEffect
   const handleFileSelect = useCallback(async (fileUrl, fileName) => {
     setIsLoading(true);
     setLocalFileName(fileName);
@@ -27,6 +29,8 @@ const BrowserView = memo(({ browserData, onNavigate }) => {
       if (response.ok) {
         const data = await response.json();
         setContent(data.content);
+        setHtmlContent(data.content); // Add this line to set the HTML content
+        setDisplayType('html'); // Set display type to HTML for local files
         
         if (onNavigate) {
           onNavigate({
@@ -44,6 +48,47 @@ const BrowserView = memo(({ browserData, onNavigate }) => {
       setIsLoading(false);
     }
   }, [onNavigate]);
+
+  // Then use it in useEffect
+  useEffect(() => {
+    if (browserData) {
+      console.log('BrowserView received browserData:', browserData);
+      
+      if (browserData.type === 'browser_content' && browserData.content?.html) {
+        console.log('Setting HTML content from browser_content');
+        setHtmlContent(browserData.content.html);
+        setDisplayType('html');
+      } else if (browserData.type === 'browser_event' && browserData.content?.url) {
+        console.log('Setting URL from browser_event:', browserData.content.url);
+        const url = browserData.content.url;
+        
+        // For Google Search HTML files in the static/temp directory
+        if (url.includes('/static/temp/search_results_')) {
+          console.log('Loading Google search results from static file');
+          fetch(url.replace('file://', 'http://localhost:8001/'))
+            .then(response => response.text())
+            .then(html => {
+              setHtmlContent(html);
+              setDisplayType('html');
+            })
+            .catch(err => console.error('Error fetching search results:', err));
+        } 
+        // For regular file:// URLs
+        else if (url.startsWith('file://')) {
+          console.log('Loading local file:', url);
+          const fileName = url.split('/').pop();
+          setUrl(url);
+          setDisplayType('url');
+          handleFileSelect(url, fileName);
+        } 
+        // For regular web URLs
+        else {
+          setUrl(url);
+          setDisplayType('url');
+        }
+      }
+    }
+  }, [browserData, handleFileSelect]);
 
   // Then define fetchUrl using handleFileSelect
   const fetchUrl = useCallback(async () => {
@@ -100,6 +145,32 @@ const BrowserView = memo(({ browserData, onNavigate }) => {
         backgroundColor: '#f5f5f5',
         justifyContent: 'space-between'
       }}>
+        <div style={{display: 'flex', gap: '8px'}}>
+          <button 
+            onClick={() => window.history.back()}
+            style={{
+              background: 'none',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              padding: '4px 8px',
+              cursor: 'pointer'
+            }}
+          >
+            ←
+          </button>
+          <button 
+            onClick={() => displayType === 'url' ? window.location.reload() : setHtmlContent(htmlContent)}
+            style={{
+              background: 'none',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              padding: '4px 8px',
+              cursor: 'pointer'
+            }}
+          >
+            ↻
+          </button>
+        </div>
         <div style={{ 
           overflow: 'hidden', 
           textOverflow: 'ellipsis', 
@@ -116,27 +187,26 @@ const BrowserView = memo(({ browserData, onNavigate }) => {
         overflow: 'auto',
         backgroundColor: 'white'
       }}>
-        {content ? (
+        {displayType === 'html' && (
           <iframe
-            srcDoc={content}
+            srcDoc={htmlContent}
             style={{
               width: '100%',
               height: '100%',
               border: 'none'
             }}
-            sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-presentation"
-            allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+            sandbox="allow-same-origin allow-scripts"
           />
-        ) : url ? (
-          <iframe 
-            src={url} 
-            style={{ 
-              width: '100%', 
+        )}
+        {displayType === 'url' && url ? (
+          <iframe
+            src={url}
+            style={{
+              width: '100%',
               height: '100%',
               border: 'none'
             }}
-            sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-presentation"
-            allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+            sandbox="allow-same-origin allow-scripts"
           />
         ) : null}
       </div>
